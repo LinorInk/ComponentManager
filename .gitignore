@@ -13,8 +13,22 @@ npm-cache/
 # tauri icon 命令生成的非本项目平台图标（只发 Windows，不需要安卓/iOS/商店磁贴）
 src-tauri/icons/android/
 src-tauri/icons/ios/
+src-tauri/icons/icon.icns
+src-tauri/icons/StoreLogo.png
+src-tauri/icons/Square*.png
 
-# 系统与编辑器临时文件
+# IDE 与本地工具配置
+.vscode/
+.idea/
+.trae/
+
+# 系统、编辑器与构建临时文件
 Thumbs.db
 desktop.ini
+.DS_Store
+.cargo/
 *.tmp
+*.bak
+*.orig
+*.rej
+*.pdb
