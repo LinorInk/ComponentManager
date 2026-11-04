@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS components (
     location TEXT,
     datasheet_url TEXT,
     notes TEXT,
+    precision TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -39,7 +40,7 @@ CREATE INDEX IF NOT EXISTS idx_components_category ON components(category);
 const LIB_INDEX_SQL: &str = "CREATE INDEX IF NOT EXISTS idx_components_library ON components(library_id)";
 
 const COLS: &str =
-    "id, name, category, package, manufacturer, quantity, location, datasheet_url, notes, created_at";
+    "id, name, category, package, manufacturer, quantity, location, datasheet_url, notes, precision, created_at";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Component {
@@ -61,6 +62,8 @@ pub struct Component {
     pub datasheet_url: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
+    #[serde(default)]
+    pub precision: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
 }
@@ -100,28 +103,36 @@ fn row_to_component(row: &Row) -> rusqlite::Result<Component> {
         location: row.get(6)?,
         datasheet_url: row.get(7)?,
         notes: row.get(8)?,
-        created_at: row.get(9)?,
+        precision: row.get(9)?,
+        created_at: row.get(10)?,
     })
 }
 
-/// 建表并兼容旧版单库数据：补 library_id 列，旧记录归入“默认库”
+/// 检查 components 表是否已有某列（用于老库补列迁移）
+fn has_component_col(conn: &Connection, col: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare("PRAGMA table_info(components)")?;
+    let mut found = false;
+    let mut rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    while let Some(r) = rows.next() {
+        if r? == col {
+            found = true;
+        }
+    }
+    Ok(found)
+}
+
+/// 建表并兼容旧版数据：补 library_id、precision 列，旧记录归入“默认库”
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA)?;
 
-    let has_col = {
-        let mut stmt = conn.prepare("PRAGMA table_info(components)")?;
-        let mut names = Vec::new();
-        let mut rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
-        while let Some(r) = rows.next() {
-            names.push(r?);
-        }
-        names.iter().any(|c| c == "library_id")
-    };
-    if !has_col {
+    if !has_component_col(conn, "library_id")? {
         conn.execute(
             "ALTER TABLE components ADD COLUMN library_id INTEGER NOT NULL DEFAULT 1",
             [],
         )?;
+    }
+    if !has_component_col(conn, "precision")? {
+        conn.execute("ALTER TABLE components ADD COLUMN precision TEXT", [])?;
     }
 
     let lib_cnt: i64 = conn.query_row("SELECT COUNT(*) FROM libraries", [], |r| r.get(0))?;
@@ -571,8 +582,8 @@ fn import_library(
         }
         conn.execute(
             "INSERT INTO components
-                (library_id, name, category, package, manufacturer, quantity, location, datasheet_url, notes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                (library_id, name, category, package, manufacturer, quantity, location, datasheet_url, notes, precision)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 library_id,
                 name,
@@ -583,6 +594,7 @@ fn import_library(
                 norm(&c.location),
                 norm(&c.datasheet_url),
                 norm(&c.notes),
+                norm(&c.precision),
             ],
         )
         .map_err(err)?;
@@ -655,8 +667,8 @@ fn add_component(db: State<'_, Db>, library_id: i64, comp: Component) -> Result<
     }
     conn.execute(
         "INSERT INTO components
-            (library_id, name, category, package, manufacturer, quantity, location, datasheet_url, notes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            (library_id, name, category, package, manufacturer, quantity, location, datasheet_url, notes, precision)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             library_id,
             name,
@@ -667,6 +679,7 @@ fn add_component(db: State<'_, Db>, library_id: i64, comp: Component) -> Result<
             norm(&comp.location),
             norm(&comp.datasheet_url),
             norm(&comp.notes),
+            norm(&comp.precision),
         ],
     )
     .map_err(err)?;
@@ -684,7 +697,7 @@ fn update_component(db: State<'_, Db>, comp: Component) -> Result<bool, String> 
         .execute(
             "UPDATE components SET
                 name = ?2, category = ?3, package = ?4, manufacturer = ?5,
-                quantity = ?6, location = ?7, datasheet_url = ?8, notes = ?9
+                quantity = ?6, location = ?7, datasheet_url = ?8, notes = ?9, precision = ?10
              WHERE id = ?1",
             params![
                 comp.id,
@@ -696,6 +709,7 @@ fn update_component(db: State<'_, Db>, comp: Component) -> Result<bool, String> 
                 norm(&comp.location),
                 norm(&comp.datasheet_url),
                 norm(&comp.notes),
+                norm(&comp.precision),
             ],
         )
         .map_err(err)?;

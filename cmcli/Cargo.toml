@@ -1,0 +1,22 @@
+[package]
+name = "cmcli"
+version = "0.1.0"
+description = "元件库存管理器 命令行工具 —— 与图形界面共用同一 SQLite 数据库"
+edition = "2021"
+
+[[bin]]
+name = "cmcli"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true

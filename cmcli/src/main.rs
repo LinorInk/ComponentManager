@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS components (
     location TEXT,
     datasheet_url TEXT,
     notes TEXT,
+    precision TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -38,7 +39,7 @@ CREATE INDEX IF NOT EXISTS idx_components_library ON components(library_id);
 "#;
 
 const COLS: &str =
-    "id, name, category, package, manufacturer, quantity, location, datasheet_url, notes, created_at";
+    "id, name, category, package, manufacturer, quantity, location, datasheet_url, notes, precision, created_at";
 
 /// 与图形界面导出/导入文件的标识一致
 const APP_TAG: &str = "ComponentManager";
@@ -63,6 +64,8 @@ struct Component {
     datasheet_url: Option<String>,
     #[serde(default)]
     notes: Option<String>,
+    #[serde(default)]
+    precision: Option<String>,
     #[serde(default)]
     created_at: Option<String>,
 }
@@ -109,7 +112,8 @@ fn row_to_component(row: &Row) -> rusqlite::Result<Component> {
         location: row.get(6)?,
         datasheet_url: row.get(7)?,
         notes: row.get(8)?,
-        created_at: row.get(9)?,
+        precision: row.get(9)?,
+        created_at: row.get(10)?,
     })
 }
 
@@ -143,7 +147,26 @@ fn open_db() -> Result<Connection, String> {
     // GUI 可能同时开着库，等待锁而不是直接报错
     conn.busy_timeout(Duration::from_secs(5)).map_err(err)?;
     conn.execute_batch(SCHEMA).map_err(err)?;
+    // 老库缺 precision 列时补上，保持与新版 COLS 一致
+    if !has_component_col(&conn, "precision").map_err(err)? {
+        conn
+            .execute("ALTER TABLE components ADD COLUMN precision TEXT", [])
+            .map_err(err)?;
+    }
     Ok(conn)
+}
+
+/// components 表是否已有某列
+fn has_component_col(conn: &Connection, col: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare("PRAGMA table_info(components)")?;
+    let mut found = false;
+    let mut rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    while let Some(r) = rows.next() {
+        if r? == col {
+            found = true;
+        }
+    }
+    Ok(found)
 }
 
 fn require_library(conn: &Connection, id: i64) -> Result<String, String> {
@@ -364,8 +387,8 @@ fn cmd_add(p: &Parsed) -> Result<(), String> {
     require_library(&conn, lib)?;
     conn.execute(
         "INSERT INTO components
-            (library_id, name, category, package, manufacturer, quantity, location, datasheet_url, notes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            (library_id, name, category, package, manufacturer, quantity, location, datasheet_url, notes, precision)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             lib,
             name,
@@ -376,6 +399,7 @@ fn cmd_add(p: &Parsed) -> Result<(), String> {
             p.flags.get("location").map(|s| norm(s)).flatten(),
             datasheet,
             p.flags.get("notes").map(|s| norm(s)).flatten(),
+            p.flags.get("precision").map(|s| norm(s)).flatten(),
         ],
     )
     .map_err(err)?;
@@ -408,7 +432,7 @@ fn cmd_update(p: &Parsed) -> Result<(), String> {
         }};
     }
 
-    for key in ["category", "package", "manufacturer", "location", "notes"] {
+    for key in ["category", "package", "manufacturer", "location", "notes", "precision"] {
         if let Some(v) = p.flags.get(key) {
             let v = norm(v).unwrap_or_default();
             push_str!(key, v);
@@ -429,7 +453,7 @@ fn cmd_update(p: &Parsed) -> Result<(), String> {
         push_str!("datasheet_url", stored);
     }
     if sets.is_empty() {
-        return Err("没有要更新的字段（--name/--category/--package/--manufacturer/--qty/--location/--datasheet/--notes）".into());
+        return Err("没有要更新的字段（--name/--category/--package/--manufacturer/--qty/--location/--datasheet/--notes/--precision）".into());
     }
 
     let conn = open_db()?;
@@ -595,8 +619,8 @@ fn cmd_import(p: &Parsed) -> Result<(), String> {
         }
         conn.execute(
             "INSERT INTO components
-                (library_id, name, category, package, manufacturer, quantity, location, datasheet_url, notes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                (library_id, name, category, package, manufacturer, quantity, location, datasheet_url, notes, precision)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 lib,
                 name,
@@ -607,6 +631,7 @@ fn cmd_import(p: &Parsed) -> Result<(), String> {
                 c.location,
                 c.datasheet_url,
                 c.notes,
+                c.precision,
             ],
         )
         .map_err(err)?;
@@ -678,6 +703,151 @@ fn cmd_ds_delete(p: &Parsed) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------- PATH 管理 ----------------
+
+/// cmcli.exe 所在目录
+fn self_dir() -> Result<PathBuf, String> {
+    let exe = env::current_exe().map_err(err)?;
+    exe.parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| "无法确定程序所在目录".to_string())
+}
+
+/// 读取用户级 Path 注册表原始值（REG_EXPAND_SZ，缺失返回空串）
+#[cfg(windows)]
+fn user_path() -> Result<String, String> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+    use winreg::RegKey;
+    let env_key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags("Environment", KEY_READ)
+        .map_err(err)?;
+    Ok(match env_key.get_raw_value("Path") {
+        Ok(v) => {
+            let s = String::from_utf16_lossy(utf16_bytes_to_u16(&v.bytes));
+            s.trim_end_matches('\0').to_string()
+        }
+        Err(_) => String::new(),
+    })
+}
+
+fn utf16_bytes_to_u16(bytes: &[u8]) -> &[u16] {
+    // 注册表 REG_*_SZ 为偶数字节 UTF-16LE，此转换安全
+    unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u16, bytes.len() / 2) }
+}
+
+#[cfg(windows)]
+fn write_user_path(value: &str) -> Result<(), String> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE, REG_EXPAND_SZ};
+    use winreg::RegKey;
+    let env_key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags("Environment", KEY_WRITE)
+        .map_err(err)?;
+    env_key
+        .set_raw_value(
+            "Path",
+            &winreg::RegValue {
+                bytes: value
+                    .encode_utf16()
+                    .flat_map(|c| c.to_ne_bytes())
+                    .chain([0, 0, 0, 0])
+                    .collect(),
+                vtype: REG_EXPAND_SZ,
+            },
+        )
+        .map_err(err)
+}
+
+/// 广播 WM_SETTINGCHANGE，让资源管理器刷新用户环境变量：
+/// 新开的终端立即能用上新的 PATH，无需注销或重启 Explorer
+#[cfg(windows)]
+fn broadcast_env_change() {
+    use std::ffi::c_void;
+    #[link(name = "user32")]
+    extern "system" {
+        fn SendMessageTimeoutW(
+            hwnd: *mut c_void,
+            msg: u32,
+            wparam: usize,
+            lparam: *const u16,
+            flags: u32,
+            timeout: u32,
+            result: *mut usize,
+        ) -> isize;
+    }
+    const SMTO_ABORTIFHUNG: u32 = 0x0002;
+    const WM_SETTINGCHANGE: u32 = 0x001A;
+    const HWND_BROADCAST: usize = 0xffff;
+    let target: Vec<u16> = "Environment".encode_utf16().chain([0u16]).collect();
+    let mut res: usize = 0;
+    unsafe {
+        SendMessageTimeoutW(
+            HWND_BROADCAST as *mut c_void,
+            WM_SETTINGCHANGE,
+            0,
+            target.as_ptr(),
+            SMTO_ABORTIFHUNG,
+            5000,
+            &mut res,
+        );
+    }
+}
+
+/// 把 cmcli 所在目录加入用户 PATH（幂等）。新开的终端立即生效。
+#[cfg(windows)]
+fn cmd_path_add(_p: &Parsed) -> Result<(), String> {
+    let dir = self_dir()?;
+    let dir_s = dir.to_string_lossy().to_string();
+    let cur = user_path()?;
+    let parts: Vec<String> = cur.split(';').map(|s| s.trim_end_matches('\\').to_string()).collect();
+    let already = parts
+        .iter()
+        .any(|x| x.eq_ignore_ascii_case(&dir_s));
+    if already {
+        print_json(&serde_json::json!({ "status": "already", "path_dir": dir_s }));
+        return Ok(());
+    }
+    let new_val = if cur.is_empty() {
+        dir_s.clone()
+    } else {
+        format!("{};{}", cur.trim_end_matches(';'), dir_s)
+    };
+    write_user_path(&new_val)?;
+    broadcast_env_change();
+    print_json(&serde_json::json!({ "status": "added", "path_dir": dir_s, "note": "新开的终端即可直接运行 cmcli；已开终端需重开" }));
+    Ok(())
+}
+
+/// 从用户 PATH 移除 cmcli 所在目录（不动其他条目）。
+#[cfg(windows)]
+fn cmd_path_remove(_p: &Parsed) -> Result<(), String> {
+    let dir = self_dir()?;
+    let dir_s = dir.to_string_lossy().to_string();
+    let cur = user_path()?;
+    let kept: Vec<String> = cur
+        .split(';')
+        .filter(|x| !x.trim_end_matches('\\').eq_ignore_ascii_case(&dir_s))
+        .map(|s| s.to_string())
+        .collect();
+    if kept.len() == cur.split(';').count() {
+        print_json(&serde_json::json!({ "status": "not-in-path", "path_dir": dir_s }));
+        return Ok(());
+    }
+    write_user_path(&kept.join(";"))?;
+    broadcast_env_change();
+    print_json(&serde_json::json!({ "status": "removed", "path_dir": dir_s }));
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn cmd_path_add(_p: &Parsed) -> Result<(), String> {
+    Err("仅 Windows 支持 PATH 管理".into())
+}
+
+#[cfg(not(windows))]
+fn cmd_path_remove(_p: &Parsed) -> Result<(), String> {
+    Err("仅 Windows 支持 PATH 管理".into())
+}
+
 // ---------------- 入口 ----------------
 
 fn help_text() -> String {
@@ -700,10 +870,13 @@ fn help_text() -> String {
   cmcli import <库id> <文件路径>                从 JSON 导入到库（同名元件跳过）
   cmcli datasheets                             列出本地手册文件及引用情况
   cmcli ds-delete <手册文件名>                  删除本地手册（同步清除引用）
+  cmcli path-add                               把 cmcli 所在目录加入用户 PATH（免全路径调用）
+  cmcli path-remove                            从用户 PATH 移除 cmcli 所在目录
 
 add / update 选项（均可选）：
   --category <类别>   --package <封装>   --manufacturer <制造商>
   --qty <数量>        --location <位置>   --notes <备注>
+  --precision <精度>  电阻/电容/电感的精度，如 "±1%"、"±20% M"（其他类别一般不用）
   --datasheet <值>    http(s) 链接原样保存；本地 PDF 路径会复制进
                       %APPDATA%\com.componentmanager.app\datasheets\（同名复用）
 
@@ -740,6 +913,8 @@ fn run() -> i32 {
         "import" => cmd_import(&p),
         "datasheets" => cmd_datasheets(&p),
         "ds-delete" => cmd_ds_delete(&p),
+        "path-add" => cmd_path_add(&p),
+        "path-remove" => cmd_path_remove(&p),
         other => Err(format!("未知命令：{other}（运行 cmcli help 查看全部命令）")),
     };
     match r {

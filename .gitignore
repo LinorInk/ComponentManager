@@ -1,15 +1,16 @@
-# 依赖与构建产物
+# 依赖与构建产物（target/ 通配所有 Rust 子工程：src-tauri 与 cmcli）
 node_modules/
 dist/
-src-tauri/target/
+target/
 src-tauri/gen/
+src-tauri/bin/
 
 # 数据与日志（数据库本体在 %APPDATA%，此处兜底）
 *.db
 *.log
 npm-cache/
 
-# tauri icon 命令生成的非本项目平台图标（只发布 Windows，不需要安卓/iOS/商店磁贴）
+# tauri icon 命令生成的非本项目平台图标（只发 Windows，不需要安卓/iOS/商店磁贴）
 src-tauri/icons/android/
 src-tauri/icons/ios/
 

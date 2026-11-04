@@ -3,18 +3,28 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { confirm, message } from "@tauri-apps/plugin-dialog";
 
-const CATEGORIES = ["电阻", "电容", "二极管", "三极管", "IC", "模块", "其他"];
+const CATEGORIES = ["电阻", "电容", "电感", "二极管", "三极管", "IC", "模块", "其他"];
 
 // 各类别的常用封装预设：点击即填入，仍可自己手输任意值
 const PKG_PRESETS = {
   电阻: ["0201", "0402", "0603", "0805", "1206", "2512", "直插 1/4W"],
   电容: ["0402", "0603", "0805", "1210", "SOD-8", "铝电解 6.3x5.8", "直插铝电解"],
+  电感: ["0402", "0603", "0805", "1210", "CDRH 绕线", "一体成型", "工字直插"],
   二极管: ["SOD-123", "SOD-323", "SMA(DO-214AC)", "SMB(DO-214AA)", "DO-41", "DO-35 玻璃"],
   三极管: ["SOT-23", "SOT-323", "SOT-89", "TO-92", "TO-220", "TO-252(DPAK)", "TO-263"],
   IC: ["SOT-23-5", "SOP-8", "SOP-16", "TSSOP-20", "SSOP-28", "QFN-32", "LQFP48", "TQFP64", "DIP-8", "DIP-40"],
   模块: ["DIP 排针 2.54", "邮票孔", "ESP32 模组", "USB 型", "螺丝端子"],
   其他: ["0603", "0805", "SOT-23", "SOP-8", "DIP", "直插", "贴片"],
 };
+
+// 精度预设：仅电阻/电容/电感显示；点选或手输均可（J/K/M 为常用误差代码）
+const PRECISION_PRESETS = {
+  电阻: ["±0.1%", "±0.5%", "±1%", "±2%", "±5%", "J(±5%)", "F(±1%)"],
+  电容: ["±0.5% C", "±1% F", "±2% G", "±5% J", "±10% K", "±20% M"],
+  电感: ["±1%", "±2%", "±5%", "±10% K", "±20% M", "G(±2%)", "J(±5%)"],
+};
+// 有精度字段的类别
+const RLC = ["电阻", "电容", "电感"];
 const LOW_STOCK = 5; // 数量低于此值高亮提醒
 
 // 页面是否运行在 Tauri 应用窗口中（浏览器里打开 dev 页面时无法调用后端命令）
@@ -43,6 +53,7 @@ const EMPTY_FORM = {
   location: "",
   datasheet_url: "",
   notes: "",
+  precision: "",
 };
 
 export default function App() {
@@ -525,7 +536,10 @@ export default function App() {
                 <tr key={r.id}>
                   <td>{r.name}</td>
                   <td>{r.category || <span className="muted">—</span>}</td>
-                  <td className="mono">{r.package || <span className="muted">—</span>}</td>
+                  <td className="mono">
+                    {r.package || <span className="muted">—</span>}
+                    {r.precision && <div className="prec">{r.precision}</div>}
+                  </td>
                   <td>{r.manufacturer || <span className="muted">—</span>}</td>
                   <td className={r.quantity <= LOW_STOCK ? "qty-low" : ""}>{r.quantity}</td>
                   <td className="loc">{r.location || <span className="muted">—</span>}</td>
@@ -608,6 +622,35 @@ export default function App() {
                   placeholder="点选上方常用封装，或直接输入"
                 />
               </div>
+
+              {RLC.includes(modal.form.category) && (
+                <>
+                  <label>精度</label>
+                  <div className="pkg-area">
+                    <div className="pkg-tags">
+                      {(PRECISION_PRESETS[modal.form.category] || []).map((x) => (
+                        <button
+                          type="button"
+                          key={x}
+                          className={"pkg-tag" + (modal.form.precision === x ? " on" : "")}
+                          title={modal.form.precision === x ? "再次点击取消选择" : `填入 ${x}`}
+                          onClick={() =>
+                            setField("precision", modal.form.precision === x ? "" : x)
+                          }
+                        >
+                          {x}
+                        </button>
+                      ))}
+                    </div>
+                    <input
+                      className="full"
+                      value={modal.form.precision}
+                      onChange={(e) => setField("precision", e.target.value)}
+                      placeholder="点选常用精度，或直接输入（如 ±1%）"
+                    />
+                  </div>
+                </>
+              )}
 
               <label>制造商</label>
               <input

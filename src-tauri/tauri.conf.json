@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://127.0.0.1:5173",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && node scripts/sync-cli.mjs",
     "frontendDist": "../dist"
   },
   "app": {
@@ -27,7 +27,13 @@
   "bundle": {
     "active": true,
     "targets": ["msi", "nsis"],
+    "externalBin": ["bin/cmcli"],
     "category": "Utility",
+    "windows": {
+      "nsis": {
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    },
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"]
   }
 }

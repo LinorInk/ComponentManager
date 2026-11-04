@@ -246,6 +246,14 @@ td.mono {
   min-width: 0;
 }
 
+/* 列表中精度副行 */
+td .prec {
+  color: var(--muted);
+  font-size: 11px;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  margin-top: 1px;
+}
+
 .pkg-tags {
   display: flex;
   flex-wrap: wrap;
