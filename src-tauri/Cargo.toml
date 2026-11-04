@@ -1,0 +1,31 @@
+[package]
+name = "component-manager"
+version = "0.1.0"
+description = "元件库存管理器 —— 个人电子元器件入库、查询与管理"
+edition = "2021"
+default-run = "component-manager"
+
+# 两个可执行文件：GUI（main.rs）与命令行工具 cmcli（cli.rs），共用同一数据库
+[[bin]]
+name = "component-manager"
+path = "src/main.rs"
+
+[[bin]]
+name = "cmcli"
+path = "src/cli.rs"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true

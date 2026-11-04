@@ -1,0 +1,19 @@
+# 依赖与构建产物
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# 数据与日志（数据库本体在 %APPDATA%，此处兜底）
+*.db
+*.log
+npm-cache/
+
+# tauri icon 命令生成的非本项目平台图标（只发布 Windows，不需要安卓/iOS/商店磁贴）
+src-tauri/icons/android/
+src-tauri/icons/ios/
+
+# 系统与编辑器临时文件
+Thumbs.db
+desktop.ini
+*.tmp
