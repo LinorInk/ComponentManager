@@ -303,7 +303,7 @@ export default function App() {
       setField("datasheet_url", res.file_name);
       if (res.reused) {
         notice(
-          `本地已有同名手册「${res.file_name}」。\n已跳过复制，直接复用现有文件（多个元件可共用同一份手册）。`
+          `本地已有同名手册「${res.file_name}」。\n已跳过复制，直接复用现有文件。`
         );
       }
     } catch (e) {
@@ -346,9 +346,7 @@ export default function App() {
   async function delDs(f) {
     const refTip =
       f.refs.length > 0
-        ? `它仍被 ${f.refs.length} 个元件引用（${f.refs.slice(0, 3).join("、")}${
-            f.refs.length > 3 ? "…" : ""
-          }），删除后这些元件的手册引用会一并清除。`
+        ? `它仍被 ${f.refs.length} 个元件引用，删除后这些元件的手册引用会一并清除。`
         : "当前没有元件引用它，可放心删除。";
     const ok = await askConfirm(`确定删除本地手册「${f.file_name}」？${refTip}`, "warning");
     if (!ok) return;
@@ -411,7 +409,7 @@ export default function App() {
 
             <div className="lib-card add">
               <input
-                placeholder="新库名称，如：我的 / 张三的"
+                placeholder="新库名称"
                 value={newLibName}
                 onChange={(e) => setNewLibName(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && createLib()}
@@ -573,7 +571,7 @@ export default function App() {
         <div className="modal-mask" onClick={() => setModal(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <header>
-              {modal.mode === "add" ? `新增元件（库：${lib.name}）` : `编辑：${modal.form.name}`}
+              {modal.mode === "add" ? "新增元件" : `编辑：${modal.form.name}`}
             </header>
             <div className="body">
               <label className="req">名称</label>
@@ -582,7 +580,6 @@ export default function App() {
                 autoFocus
                 value={modal.form.name}
                 onChange={(e) => setField("name", e.target.value)}
-                placeholder="如 STM32F103C8T6"
               />
 
               <label>类别</label>
@@ -646,7 +643,7 @@ export default function App() {
                       className="full"
                       value={modal.form.precision}
                       onChange={(e) => setField("precision", e.target.value)}
-                      placeholder="点选常用精度，或直接输入（如 ±1%）"
+                      placeholder="点选常用精度，或直接输入"
                     />
                   </div>
                 </>
@@ -672,7 +669,6 @@ export default function App() {
                 className="full"
                 value={modal.form.location}
                 onChange={(e) => setField("location", e.target.value)}
-                placeholder="如 B05-R2-C08"
               />
 
               <label>数据手册</label>

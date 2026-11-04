@@ -5,12 +5,13 @@ description = "元件库存管理器 —— 个人电子元器件入库、查询
 edition = "2021"
 
 [dependencies]
+cm-core = { path = "../core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

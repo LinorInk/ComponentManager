@@ -1,210 +1,32 @@
 // cmcli —— 元件库存管理器命令行工具
-// 与图形界面（main.rs）共用同一个 SQLite 数据库，供脚本 / AI 快速录入与查询元件。
+// 数据层全部来自共享库 cm-core：表结构、迁移、查询、增删改、导入导出只保留一份实现。
+// 本文件只做「参数 → core 调用 → JSON 输出」的薄封装：
+// 参数解析见 args.rs，帮助文本见 help.rs，用户 PATH 管理见 pathenv.rs。
 // 用法见根目录《命令行使用说明.md》或运行 `cmcli help`。
 
-use rusqlite::{params, Connection, Row};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::env;
+mod args;
+mod help;
+mod pathenv;
+
+use args::{need_comp_id, need_id, need_int, need_str, parse_args, Parsed};
+use cm_core::models::{self, Component};
+use cm_core::{appdir, components, datasheet, transfer};
+use serde::Serialize;
 use std::fs;
-use std::path::PathBuf;
-use std::time::Duration;
 
-/// 必须与 main.rs 中的表结构保持一致
-const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS libraries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
+/// add / update 共用的文本选项（与 Component 字段同名）
+const TEXT_OPTIONS: [&str; 6] = [
+    "category",
+    "package",
+    "manufacturer",
+    "location",
+    "notes",
+    "precision",
+];
 
-CREATE TABLE IF NOT EXISTS components (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    library_id INTEGER NOT NULL DEFAULT 1,
-    name TEXT NOT NULL,
-    category TEXT,
-    package TEXT,
-    manufacturer TEXT,
-    quantity INTEGER DEFAULT 0,
-    location TEXT,
-    datasheet_url TEXT,
-    notes TEXT,
-    precision TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
+// ---------------- 输出 ----------------
 
-CREATE INDEX IF NOT EXISTS idx_components_name ON components(name);
-CREATE INDEX IF NOT EXISTS idx_components_category ON components(category);
-CREATE INDEX IF NOT EXISTS idx_components_library ON components(library_id);
-"#;
-
-const COLS: &str =
-    "id, name, category, package, manufacturer, quantity, location, datasheet_url, notes, precision, created_at";
-
-/// 与图形界面导出/导入文件的标识一致
-const APP_TAG: &str = "ComponentManager";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Component {
-    #[serde(default)]
-    id: i64,
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    category: Option<String>,
-    #[serde(default)]
-    package: Option<String>,
-    #[serde(default)]
-    manufacturer: Option<String>,
-    #[serde(default)]
-    quantity: i64,
-    #[serde(default)]
-    location: Option<String>,
-    #[serde(default)]
-    datasheet_url: Option<String>,
-    #[serde(default)]
-    notes: Option<String>,
-    #[serde(default)]
-    precision: Option<String>,
-    #[serde(default)]
-    created_at: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct LibraryFile {
-    app: String,
-    version: u32,
-    library: String,
-    exported_at: String,
-    components: Vec<Component>,
-}
-
-#[derive(Debug, Serialize)]
-struct LibraryRow {
-    id: i64,
-    name: String,
-    count: i64,
-}
-
-// ---------------- 基础设施 ----------------
-
-fn err<E: std::fmt::Display>(e: E) -> String {
-    e.to_string()
-}
-
-fn norm(v: &str) -> Option<String> {
-    let t = v.trim().to_string();
-    if t.is_empty() {
-        None
-    } else {
-        Some(t)
-    }
-}
-
-fn row_to_component(row: &Row) -> rusqlite::Result<Component> {
-    Ok(Component {
-        id: row.get(0)?,
-        name: row.get(1)?,
-        category: row.get(2)?,
-        package: row.get(3)?,
-        manufacturer: row.get(4)?,
-        quantity: row.get(5)?,
-        location: row.get(6)?,
-        datasheet_url: row.get(7)?,
-        notes: row.get(8)?,
-        precision: row.get(9)?,
-        created_at: row.get(10)?,
-    })
-}
-
-/// 数据库位置与 GUI 相同：%APPDATA%\com.componentmanager.app\components.db
-/// 测试可用环境变量 CM_DB_PATH 覆盖
-fn data_dir() -> Result<PathBuf, String> {
-    if let Ok(p) = env::var("CM_DB_PATH") {
-        let dir = PathBuf::from(p)
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
-        fs::create_dir_all(&dir).map_err(err)?;
-        return Ok(dir);
-    }
-    let appdata = env::var("APPDATA").map_err(|_| "未找到 APPDATA 环境变量".to_string())?;
-    let dir = PathBuf::from(appdata).join("com.componentmanager.app");
-    fs::create_dir_all(&dir).map_err(err)?;
-    Ok(dir)
-}
-
-fn db_file() -> Result<PathBuf, String> {
-    if let Ok(p) = env::var("CM_DB_PATH") {
-        return Ok(PathBuf::from(p));
-    }
-    Ok(data_dir()?.join("components.db"))
-}
-
-fn open_db() -> Result<Connection, String> {
-    let file = db_file()?;
-    let conn = Connection::open(&file).map_err(err)?;
-    // GUI 可能同时开着库，等待锁而不是直接报错
-    conn.busy_timeout(Duration::from_secs(5)).map_err(err)?;
-    conn.execute_batch(SCHEMA).map_err(err)?;
-    // 老库缺 precision 列时补上，保持与新版 COLS 一致
-    if !has_component_col(&conn, "precision").map_err(err)? {
-        conn
-            .execute("ALTER TABLE components ADD COLUMN precision TEXT", [])
-            .map_err(err)?;
-    }
-    Ok(conn)
-}
-
-/// components 表是否已有某列
-fn has_component_col(conn: &Connection, col: &str) -> rusqlite::Result<bool> {
-    let mut stmt = conn.prepare("PRAGMA table_info(components)")?;
-    let mut found = false;
-    let mut rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
-    while let Some(r) = rows.next() {
-        if r? == col {
-            found = true;
-        }
-    }
-    Ok(found)
-}
-
-fn require_library(conn: &Connection, id: i64) -> Result<String, String> {
-    conn
-        .query_row(
-            "SELECT name FROM libraries WHERE id = ?1",
-            params![id],
-            |r| r.get(0),
-        )
-        .map_err(|_| format!("元件库不存在：id={id}（先用 cmcli libs 查看可用库）"))
-}
-
-fn datasheet_dir() -> Result<PathBuf, String> {
-    let dir = data_dir()?.join("datasheets");
-    fs::create_dir_all(&dir).map_err(err)?;
-    Ok(dir)
-}
-
-/// 手册字段值：http(s) 链接原样存；本地文件复制进 datasheets（同名复用），返回最终存库的值
-fn store_datasheet(value: &str) -> Result<String, String> {
-    if value.starts_with("http://") || value.starts_with("https://") {
-        return Ok(value.to_string());
-    }
-    let src = PathBuf::from(value);
-    if !src.is_file() {
-        return Err(format!("手册文件不存在：{value}"));
-    }
-    let file_name = src
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .ok_or_else(|| "无法取得文件名".to_string())?;
-    let target = datasheet_dir()?.join(&file_name);
-    if !target.exists() {
-        fs::copy(&src, &target).map_err(err)?;
-    }
-    Ok(file_name)
-}
-
+/// 成功结果统一打印为格式化 JSON
 fn print_json<T: Serialize>(v: &T) {
     println!(
         "{}",
@@ -212,712 +34,237 @@ fn print_json<T: Serialize>(v: &T) {
     );
 }
 
-// ---------------- 参数解析 ----------------
-
-struct Parsed {
-    cmd: String,
-    positional: Vec<String>,
-    flags: HashMap<String, String>,
-}
-
-fn parse_args() -> Result<Parsed, String> {
-    let raw: Vec<String> = env::args().skip(1).collect();
-    if raw.is_empty() || raw[0] == "help" || raw[0] == "--help" || raw[0] == "-h" {
-        return Err("USAGE".into()); // 主函数里转成帮助文本
+/// --datasheet 选项语义：链接原样存；本地文件复制进手册库后存裸文件名
+fn datasheet_value(p: &Parsed) -> Result<Option<String>, String> {
+    match p.flags.get("datasheet") {
+        Some(v) => Ok(Some(datasheet::store_value(&appdir::data_dir()?, v)?)),
+        None => Ok(None),
     }
-    let mut p = Parsed {
-        cmd: raw[0].clone(),
-        positional: Vec::new(),
-        flags: HashMap::new(),
-    };
-    let mut i = 1;
-    while i < raw.len() {
-        let tok = &raw[i];
-        if let Some(key) = tok.strip_prefix("--") {
-            let val = raw
-                .get(i + 1)
-                .ok_or_else(|| format!("缺少 --{key} 的值"))?;
-            p.flags.insert(key.to_string(), val.clone());
-            i += 2;
-        } else {
-            p.positional.push(tok.clone());
-            i += 1;
-        }
+}
+
+/// 不接受位置参数的命令（libs / datasheets 等）做一次校验
+fn no_args(p: &Parsed, usage: &str) -> Result<(), String> {
+    if p.positional.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("用法：{usage}"))
     }
-    Ok(p)
 }
 
-fn need_str(p: &Parsed, idx: usize, what: &str) -> Result<String, String> {
-    p.positional
-        .get(idx)
-        .cloned()
-        .ok_or_else(|| format!("缺少参数：{what}"))
-}
-
-fn need_id(p: &Parsed, idx: usize) -> Result<i64, String> {
-    let s = need_str(p, idx, "库 id")?;
-    s.parse::<i64>().map_err(|_| format!("库 id 必须是数字，收到：{s}"))
-}
-
-// ---------------- 子命令 ----------------
+// ---------------- 元件库 ----------------
 
 fn cmd_libs(p: &Parsed) -> Result<(), String> {
-    if !p.positional.is_empty() {
-        return Err("用法：cmcli libs".into());
-    }
-    let conn = open_db()?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT l.id, l.name,
-                    (SELECT COUNT(*) FROM components c WHERE c.library_id = l.id)
-             FROM libraries l ORDER BY l.id",
-        )
-        .map_err(err)?;
-    let out = stmt
-        .query_map([], |r| {
-            Ok(LibraryRow {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                count: r.get(2)?,
-            })
-        })
-        .map_err(err)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(err)?;
-    print_json(&out);
+    no_args(p, "cmcli libs")?;
+    print_json(&models::list_libraries(&appdir::open_db()?)?);
     Ok(())
 }
 
 fn cmd_lib_create(p: &Parsed) -> Result<(), String> {
     let name = need_str(p, 0, "库名")?;
-    let name = name.trim().to_string();
-    if name.is_empty() {
-        return Err("库名不能为空".into());
-    }
-    let conn = open_db()?;
-    conn.execute("INSERT INTO libraries (name) VALUES (?1)", params![name])
-        .map_err(|e| {
-            if e.to_string().contains("UNIQUE") {
-                format!("库名「{name}」已存在")
-            } else {
-                err(e)
-            }
-        })?;
-    print_json(&serde_json::json!({ "id": conn.last_insert_rowid(), "name": name }));
+    let conn = appdir::open_db()?;
+    let (id, name) = models::create_library(&conn, &name)?;
+    print_json(&serde_json::json!({ "id": id, "name": name }));
     Ok(())
 }
 
-fn select_components(
-    conn: &Connection,
-    library_id: i64,
-    keyword: Option<&str>,
-) -> Result<Vec<Component>, String> {
-    let out = match keyword {
-        None => {
-            let sql =
-                format!("SELECT {COLS} FROM components WHERE library_id = ?1 ORDER BY id DESC");
-            let mut stmt = conn.prepare(&sql).map_err(err)?;
-            let v = stmt
-                .query_map(params![library_id], row_to_component)
-                .map_err(err)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(err)?;
-            v
-        }
-        Some(kw) => {
-            let sql = format!(
-                "SELECT {COLS} FROM components
-                 WHERE library_id = :lid
-                   AND (name LIKE :kw ESCAPE '\\'
-                     OR category LIKE :kw ESCAPE '\\'
-                     OR package LIKE :kw ESCAPE '\\'
-                     OR location LIKE :kw ESCAPE '\\')
-                 ORDER BY name ASC"
-            );
-            let like = format!("%{}%", kw.replace('%', "\\%").replace('_', "\\_"));
-            let mut stmt = conn.prepare(&sql).map_err(err)?;
-            let v = stmt
-                .query_map(
-                    rusqlite::named_params! { ":lid": library_id, ":kw": like },
-                    row_to_component,
-                )
-                .map_err(err)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(err)?;
-            v
-        }
-    };
-    Ok(out)
-}
+// ---------------- 元件 ----------------
 
 fn cmd_list(p: &Parsed) -> Result<(), String> {
     let lib = need_id(p, 0)?;
-    let conn = open_db()?;
-    require_library(&conn, lib)?;
-    print_json(&select_components(&conn, lib, None)?);
+    let conn = appdir::open_db()?;
+    models::require_library(&conn, lib)?;
+    print_json(&components::list_all(&conn, lib)?);
     Ok(())
 }
 
 fn cmd_find(p: &Parsed) -> Result<(), String> {
     let lib = need_id(p, 0)?;
     let kw = need_str(p, 1, "关键词")?;
-    let conn = open_db()?;
-    require_library(&conn, lib)?;
-    print_json(&select_components(&conn, lib, Some(&kw))?);
+    let conn = appdir::open_db()?;
+    models::require_library(&conn, lib)?;
+    print_json(&components::search(&conn, lib, &kw)?);
     Ok(())
 }
 
 fn cmd_add(p: &Parsed) -> Result<(), String> {
     let lib = need_id(p, 0)?;
-    let name = need_str(p, 1, "元件名称")?;
-    let name = name.trim().to_string();
-    if name.is_empty() {
-        return Err("元件名称不能为空".into());
-    }
-    let qty: i64 = match p.flags.get("qty") {
-        Some(v) => v.parse().map_err(|_| format!("--qty 必须是整数，收到：{v}"))?,
-        None => 0,
-    };
-    let datasheet = match p.flags.get("datasheet") {
-        Some(v) => Some(store_datasheet(v)?),
-        None => None,
+    let opt = |key: &str| p.flags.get(key).and_then(|v| models::norm_str(v));
+    let comp = Component {
+        name: need_str(p, 1, "元件名称")?, // 名称合法性与空白处理交给 core
+        category: opt("category"),
+        package: opt("package"),
+        manufacturer: opt("manufacturer"),
+        location: opt("location"),
+        notes: opt("notes"),
+        precision: opt("precision"),
+        quantity: if p.flags.contains_key("qty") {
+            need_int("qty", &p.flags)?.max(0)
+        } else {
+            0
+        },
+        datasheet_url: datasheet_value(p)?,
+        ..Component::default()
     };
 
-    let conn = open_db()?;
-    require_library(&conn, lib)?;
-    conn.execute(
-        "INSERT INTO components
-            (library_id, name, category, package, manufacturer, quantity, location, datasheet_url, notes, precision)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![
-            lib,
-            name,
-            p.flags.get("category").map(|s| norm(s)).flatten(),
-            p.flags.get("package").map(|s| norm(s)).flatten(),
-            p.flags.get("manufacturer").map(|s| norm(s)).flatten(),
-            qty.max(0),
-            p.flags.get("location").map(|s| norm(s)).flatten(),
-            datasheet,
-            p.flags.get("notes").map(|s| norm(s)).flatten(),
-            p.flags.get("precision").map(|s| norm(s)).flatten(),
-        ],
-    )
-    .map_err(err)?;
-    let id = conn.last_insert_rowid();
-    let comp = conn
-        .query_row(
-            &format!("SELECT {COLS} FROM components WHERE id = ?1"),
-            params![id],
-            row_to_component,
-        )
-        .map_err(err)?;
-    print_json(&comp);
+    let conn = appdir::open_db()?;
+    models::require_library(&conn, lib)?;
+    let id = components::insert(&conn, lib, &comp)?;
+    print_json(&components::get_by_id(&conn, id)?);
     Ok(())
 }
 
 fn cmd_update(p: &Parsed) -> Result<(), String> {
     let lib = need_id(p, 0)?;
-    let comp_id: i64 = need_str(p, 1, "元件 id")?
-        .parse()
-        .map_err(|s| format!("元件 id 必须是数字：{s}"))?;
+    let comp_id = need_comp_id(p)?;
 
-    let mut sets: Vec<String> = Vec::new();
-    let mut vals: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-
-    macro_rules! push_str {
-        ($col:expr, $v:expr) => {{
-            let idx = vals.len() + 1;
-            sets.push(format!("{} = ?{}", $col, idx));
-            vals.push(Box::new($v));
-        }};
-    }
-
-    for key in ["category", "package", "manufacturer", "location", "notes", "precision"] {
+    let mut patch = components::ComponentPatch::default();
+    for key in TEXT_OPTIONS {
         if let Some(v) = p.flags.get(key) {
-            let v = norm(v).unwrap_or_default();
-            push_str!(key, v);
+            if let Some(slot) = patch.text_mut(key) {
+                *slot = models::norm_str(v);
+            }
         }
     }
     if let Some(v) = p.flags.get("name") {
-        let n = norm(v).ok_or("名称不能为空")?;
-        push_str!("name", n);
+        patch.name = Some(models::norm_str(v).ok_or("名称不能为空")?);
     }
-    if let Some(v) = p.flags.get("qty") {
-        let q: i64 = v.parse().map_err(|_| format!("--qty 必须是整数：{v}"))?;
-        let idx = vals.len() + 1;
-        sets.push(format!("quantity = ?{}", idx));
-        vals.push(Box::new(q.max(0)));
+    if p.flags.contains_key("qty") {
+        patch.quantity = Some(need_int("qty", &p.flags)?.max(0));
     }
-    if let Some(v) = p.flags.get("datasheet") {
-        let stored = store_datasheet(v)?;
-        push_str!("datasheet_url", stored);
-    }
-    if sets.is_empty() {
-        return Err("没有要更新的字段（--name/--category/--package/--manufacturer/--qty/--location/--datasheet/--notes/--precision）".into());
+    if p.flags.contains_key("datasheet") {
+        patch.datasheet_url = Some(datasheet_value(p)?);
     }
 
-    let conn = open_db()?;
-    require_library(&conn, lib)?;
-    let sql = format!(
-        "UPDATE components SET {} WHERE id = ?{} AND library_id = ?{}",
-        sets.join(", "),
-        vals.len() + 1,
-        vals.len() + 2
-    );
-    vals.push(Box::new(comp_id));
-    vals.push(Box::new(lib));
-    let refs: Vec<&dyn rusqlite::types::ToSql> = vals.iter().map(|b| b.as_ref()).collect();
-    let changed = conn.execute(&sql, refs.as_slice()).map_err(err)?;
-    if changed == 0 {
-        return Err(format!(
-            "未找到元件 id={comp_id}（确认它属于库 {lib}；cmcli find 可查询）"
-        ));
-    }
-    let comp = conn
-        .query_row(
-            &format!("SELECT {COLS} FROM components WHERE id = ?1"),
-            params![comp_id],
-            row_to_component,
-        )
-        .map_err(err)?;
-    print_json(&comp);
+    let conn = appdir::open_db()?;
+    models::require_library(&conn, lib)?;
+    print_json(&components::apply_patch(&conn, lib, comp_id, &patch)?);
     Ok(())
 }
 
-/// 库存增减：cmcli adjust <库id> <元件名> <±数量>（按名称精确匹配，忽略大小写）
 fn cmd_adjust(p: &Parsed) -> Result<(), String> {
     let lib = need_id(p, 0)?;
     let name = need_str(p, 1, "元件名称")?;
     let delta: i64 = need_str(p, 2, "增减数量")?
         .parse()
-        .map_err(|s| format!("数量必须是整数，如 +20 或 -3，收到：{s}"))?;
+        .map_err(|s| format!("数量必须是整数，收到：{s}"))?;
 
-    let conn = open_db()?;
-    require_library(&conn, lib)?;
-    let mut stmt = conn
-        .prepare("SELECT id, quantity FROM components WHERE library_id = ?1 AND LOWER(name) = LOWER(?2)")
-        .map_err(err)?;
-    let hits = stmt
-        .query_map(params![lib, name], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
-        .map_err(err)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(err)?;
-
-    match hits.len() {
-        0 => {
-            let cands = select_components(&conn, lib, Some(&name))?;
-            if cands.is_empty() {
-                Err(format!("库 {lib} 中没有元件「{name}」"))
-            } else {
-                Err(format!(
-                    "没有精确匹配「{name}」；相近的有：{}",
-                    cands
-                        .iter()
-                        .take(5)
-                        .map(|c| format!("id={} {}", c.id, c.name))
-                        .collect::<Vec<_>>()
-                        .join("；")
-                ))
-            }
-        }
-        1 => {
-            let (id, _q) = hits[0];
-            conn.execute(
-                "UPDATE components SET quantity = MAX(0, quantity + ?1) WHERE id = ?2",
-                params![delta, id],
-            )
-            .map_err(err)?;
-            let comp = conn
-                .query_row(
-                    &format!("SELECT {COLS} FROM components WHERE id = ?1"),
-                    params![id],
-                    row_to_component,
-                )
-                .map_err(err)?;
-            print_json(&comp);
-            Ok(())
-        }
-        n => Err(format!(
-            "库 {lib} 中有 {n} 个同名元件「{name}」（id：{}），请改用 cmcli update 按 id 操作",
-            hits.iter()
-                .map(|(id, _)| id.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
-    }
+    let conn = appdir::open_db()?;
+    models::require_library(&conn, lib)?;
+    print_json(&components::adjust_by_name(&conn, lib, &name, delta)?);
+    Ok(())
 }
 
 fn cmd_delete(p: &Parsed) -> Result<(), String> {
     let lib = need_id(p, 0)?;
-    let comp_id: i64 = need_str(p, 1, "元件 id")?
-        .parse()
-        .map_err(|s| format!("元件 id 必须是数字：{s}"))?;
-    let conn = open_db()?;
-    require_library(&conn, lib)?;
-    let changed = conn
-        .execute(
-            "DELETE FROM components WHERE id = ?1 AND library_id = ?2",
-            params![comp_id, lib],
-        )
-        .map_err(err)?;
-    if changed == 0 {
-        return Err(format!("未找到元件 id={comp_id}（库 {lib}）"));
+    let comp_id = need_comp_id(p)?;
+    let conn = appdir::open_db()?;
+    models::require_library(&conn, lib)?;
+    if !components::delete_in_library(&conn, comp_id, lib)? {
+        return Err(format!("未找到元件 id={comp_id}，库 {lib}"));
     }
     print_json(&serde_json::json!({ "deleted": comp_id }));
     Ok(())
 }
 
+// ---------------- 库导入导出 ----------------
+
 fn cmd_export(p: &Parsed) -> Result<(), String> {
     let lib = need_id(p, 0)?;
     let out = need_str(p, 1, "输出文件路径")?;
-    let conn = open_db()?;
-    let lib_name = require_library(&conn, lib)?;
-    let comps = select_components(&conn, lib, None)?;
-    let now: String = conn
-        .query_row("SELECT datetime('now','localtime')", [], |r| r.get(0))
-        .map_err(err)?;
-    let file = LibraryFile {
-        app: APP_TAG.to_string(),
-        version: 1,
-        library: lib_name,
-        exported_at: now,
-        components: comps,
-    };
-    fs::write(&out, serde_json::to_string_pretty(&file).map_err(err)?).map_err(err)?;
-    print_json(&serde_json::json!({ "exported": out, "count": file.components.len() }));
+    let conn = appdir::open_db()?;
+    let file = transfer::build_file(&conn, lib)?;
+    let count = file.components.len();
+    fs::write(&out, transfer::to_pretty(&file)?).map_err(|e| e.to_string())?;
+    print_json(&serde_json::json!({ "exported": out, "count": count }));
     Ok(())
 }
 
 fn cmd_import(p: &Parsed) -> Result<(), String> {
     let lib = need_id(p, 0)?;
     let path = need_str(p, 1, "导入文件路径")?;
-    let text = fs::read_to_string(&path).map_err(err)?;
-    let file: LibraryFile = serde_json::from_str(&text)
-        .map_err(|e| format!("文件解析失败，不是有效的导出文件：{e}"))?;
-    if file.app != APP_TAG {
-        return Err("该文件不是元件库存管理器导出的文件".into());
-    }
-    let conn = open_db()?;
-    require_library(&conn, lib)?;
-    let (mut added, mut skipped) = (0i64, 0i64);
-    for c in &file.components {
-        let name = c.name.trim().to_string();
-        if name.is_empty() {
-            skipped += 1;
-            continue;
-        }
-        let dup: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM components WHERE library_id = ?1 AND LOWER(name) = LOWER(?2)",
-                params![lib, name],
-                |r| r.get(0),
-            )
-            .map_err(err)?;
-        if dup > 0 {
-            skipped += 1;
-            continue;
-        }
-        conn.execute(
-            "INSERT INTO components
-                (library_id, name, category, package, manufacturer, quantity, location, datasheet_url, notes, precision)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                lib,
-                name,
-                c.category,
-                c.package,
-                c.manufacturer,
-                c.quantity.max(0),
-                c.location,
-                c.datasheet_url,
-                c.notes,
-                c.precision,
-            ],
-        )
-        .map_err(err)?;
-        added += 1;
-    }
-    print_json(&serde_json::json!({ "added": added, "skipped": skipped }));
+    let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let file = transfer::parse_file(&text)?;
+    let conn = appdir::open_db()?;
+    models::require_library(&conn, lib)?;
+    print_json(&transfer::merge_into(&conn, lib, &file)?);
     Ok(())
 }
 
+// ---------------- 本地手册管理 ----------------
+
 fn cmd_datasheets(p: &Parsed) -> Result<(), String> {
-    if !p.positional.is_empty() {
-        return Err("用法：cmcli datasheets".into());
-    }
-    let dir = datasheet_dir()?;
-    let conn = open_db()?;
-    let mut out = Vec::new();
-    for entry in fs::read_dir(&dir).map_err(err)?.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let meta = entry.metadata().ok();
-        let refs: Vec<String> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT l.name, c.name FROM components c
-                     JOIN libraries l ON l.id = c.library_id
-                     WHERE c.datasheet_url = ?1",
-                )
-                .map_err(err)?;
-            let v = stmt
-                .query_map(params![name.clone()], |r| {
-                    Ok(format!("{} / {}", r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })
-                .map_err(err)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(err)?;
-            v
-        };
-        out.push(serde_json::json!({
-            "file_name": name,
-            "size_bytes": meta.as_ref().map(|m| m.len()).unwrap_or(0),
-            "refs": refs,
-        }));
-    }
-    print_json(&out);
+    no_args(p, "cmcli datasheets")?;
+    let conn = appdir::open_db()?;
+    print_json(&datasheet::list_with_refs(&appdir::data_dir()?, &conn)?);
     Ok(())
 }
 
 fn cmd_ds_delete(p: &Parsed) -> Result<(), String> {
     let file_name = need_str(p, 0, "手册文件名")?;
-    if file_name.contains('/') || file_name.contains('\\') || file_name.contains("..") {
-        return Err("只接受 datasheets 目录内的裸文件名".into());
-    }
-    let target = datasheet_dir()?.join(&file_name);
-    if !target.is_file() {
-        return Err(format!("文件不存在：{file_name}"));
-    }
-    let conn = open_db()?;
-    let cleared = conn
-        .execute(
-            "UPDATE components SET datasheet_url = NULL WHERE datasheet_url = ?1",
-            params![file_name],
-        )
-        .map_err(err)?;
-    fs::remove_file(&target).map_err(err)?;
+    let conn = appdir::open_db()?;
+    let cleared = datasheet::delete(&appdir::data_dir()?, &conn, &file_name)?;
     print_json(&serde_json::json!({ "deleted_file": file_name, "cleared_refs": cleared }));
     Ok(())
 }
 
 // ---------------- PATH 管理 ----------------
 
-/// cmcli.exe 所在目录
-fn self_dir() -> Result<PathBuf, String> {
-    let exe = env::current_exe().map_err(err)?;
-    exe.parent()
-        .map(|p| p.to_path_buf())
-        .ok_or_else(|| "无法确定程序所在目录".to_string())
-}
-
-/// 读取用户级 Path 注册表原始值（REG_EXPAND_SZ，缺失返回空串）
-#[cfg(windows)]
-fn user_path() -> Result<String, String> {
-    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
-    use winreg::RegKey;
-    let env_key = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey_with_flags("Environment", KEY_READ)
-        .map_err(err)?;
-    Ok(match env_key.get_raw_value("Path") {
-        Ok(v) => {
-            let s = String::from_utf16_lossy(utf16_bytes_to_u16(&v.bytes));
-            s.trim_end_matches('\0').to_string()
-        }
-        Err(_) => String::new(),
-    })
-}
-
-fn utf16_bytes_to_u16(bytes: &[u8]) -> &[u16] {
-    // 注册表 REG_*_SZ 为偶数字节 UTF-16LE，此转换安全
-    unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u16, bytes.len() / 2) }
-}
-
-#[cfg(windows)]
-fn write_user_path(value: &str) -> Result<(), String> {
-    use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE, REG_EXPAND_SZ};
-    use winreg::RegKey;
-    let env_key = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey_with_flags("Environment", KEY_WRITE)
-        .map_err(err)?;
-    env_key
-        .set_raw_value(
-            "Path",
-            &winreg::RegValue {
-                bytes: value
-                    .encode_utf16()
-                    .flat_map(|c| c.to_ne_bytes())
-                    .chain([0, 0, 0, 0])
-                    .collect(),
-                vtype: REG_EXPAND_SZ,
-            },
-        )
-        .map_err(err)
-}
-
-/// 广播 WM_SETTINGCHANGE，让资源管理器刷新用户环境变量：
-/// 新开的终端立即能用上新的 PATH，无需注销或重启 Explorer
-#[cfg(windows)]
-fn broadcast_env_change() {
-    use std::ffi::c_void;
-    #[link(name = "user32")]
-    extern "system" {
-        fn SendMessageTimeoutW(
-            hwnd: *mut c_void,
-            msg: u32,
-            wparam: usize,
-            lparam: *const u16,
-            flags: u32,
-            timeout: u32,
-            result: *mut usize,
-        ) -> isize;
-    }
-    const SMTO_ABORTIFHUNG: u32 = 0x0002;
-    const WM_SETTINGCHANGE: u32 = 0x001A;
-    const HWND_BROADCAST: usize = 0xffff;
-    let target: Vec<u16> = "Environment".encode_utf16().chain([0u16]).collect();
-    let mut res: usize = 0;
-    unsafe {
-        SendMessageTimeoutW(
-            HWND_BROADCAST as *mut c_void,
-            WM_SETTINGCHANGE,
-            0,
-            target.as_ptr(),
-            SMTO_ABORTIFHUNG,
-            5000,
-            &mut res,
-        );
-    }
-}
-
-/// 把 cmcli 所在目录加入用户 PATH（幂等）。新开的终端立即生效。
-#[cfg(windows)]
 fn cmd_path_add(_p: &Parsed) -> Result<(), String> {
-    let dir = self_dir()?;
-    let dir_s = dir.to_string_lossy().to_string();
-    let cur = user_path()?;
-    let parts: Vec<String> = cur.split(';').map(|s| s.trim_end_matches('\\').to_string()).collect();
-    let already = parts
-        .iter()
-        .any(|x| x.eq_ignore_ascii_case(&dir_s));
-    if already {
-        print_json(&serde_json::json!({ "status": "already", "path_dir": dir_s }));
-        return Ok(());
+    let (status, dir) = pathenv::add()?;
+    let mut out = serde_json::json!({ "status": status, "path_dir": dir });
+    if status == "added" {
+        out["note"] = serde_json::json!("新开的终端即可直接运行 cmcli");
     }
-    let new_val = if cur.is_empty() {
-        dir_s.clone()
-    } else {
-        format!("{};{}", cur.trim_end_matches(';'), dir_s)
-    };
-    write_user_path(&new_val)?;
-    broadcast_env_change();
-    print_json(&serde_json::json!({ "status": "added", "path_dir": dir_s, "note": "新开的终端即可直接运行 cmcli；已开终端需重开" }));
+    print_json(&out);
     Ok(())
 }
 
-/// 从用户 PATH 移除 cmcli 所在目录（不动其他条目）。
-#[cfg(windows)]
 fn cmd_path_remove(_p: &Parsed) -> Result<(), String> {
-    let dir = self_dir()?;
-    let dir_s = dir.to_string_lossy().to_string();
-    let cur = user_path()?;
-    let kept: Vec<String> = cur
-        .split(';')
-        .filter(|x| !x.trim_end_matches('\\').eq_ignore_ascii_case(&dir_s))
-        .map(|s| s.to_string())
-        .collect();
-    if kept.len() == cur.split(';').count() {
-        print_json(&serde_json::json!({ "status": "not-in-path", "path_dir": dir_s }));
-        return Ok(());
-    }
-    write_user_path(&kept.join(";"))?;
-    broadcast_env_change();
-    print_json(&serde_json::json!({ "status": "removed", "path_dir": dir_s }));
+    let (status, dir) = pathenv::remove()?;
+    print_json(&serde_json::json!({ "status": status, "path_dir": dir }));
     Ok(())
-}
-
-#[cfg(not(windows))]
-fn cmd_path_add(_p: &Parsed) -> Result<(), String> {
-    Err("仅 Windows 支持 PATH 管理".into())
-}
-
-#[cfg(not(windows))]
-fn cmd_path_remove(_p: &Parsed) -> Result<(), String> {
-    Err("仅 Windows 支持 PATH 管理".into())
 }
 
 // ---------------- 入口 ----------------
 
-fn help_text() -> String {
-    format!(
-        r#"cmcli —— 元件库存管理器命令行工具（与图形界面共用同一数据库）
+/// 命令表：子命令名 → 处理函数
+const COMMANDS: &[(&str, fn(&Parsed) -> Result<(), String>)] = &[
+    ("libs", cmd_libs),
+    ("lib-create", cmd_lib_create),
+    ("list", cmd_list),
+    ("find", cmd_find),
+    ("add", cmd_add),
+    ("update", cmd_update),
+    ("adjust", cmd_adjust),
+    ("delete", cmd_delete),
+    ("export", cmd_export),
+    ("import", cmd_import),
+    ("datasheets", cmd_datasheets),
+    ("ds-delete", cmd_ds_delete),
+    ("path-add", cmd_path_add),
+    ("path-remove", cmd_path_remove),
+];
 
-数据库位置：%APPDATA%\com.componentmanager.app\components.db（可用环境变量 CM_DB_PATH 覆盖）
-输出：成功时 stdout 为 JSON；失败时 stderr 输出错误信息且退出码为 1。
-
-用法：
-  cmcli libs                                  列出全部元件库（id / 名称 / 元件数）
-  cmcli lib-create <库名>                      新建元件库
-  cmcli list <库id>                            列出库内全部元件
-  cmcli find <库id> <关键词>                    按名称/类别/封装/位置模糊搜索
-  cmcli add <库id> <名称> [选项]                新增元件
-  cmcli update <库id> <元件id> [选项]           按 id 更新元件字段
-  cmcli adjust <库id> <名称> <±数量>            库存增减（如 +20 / -3），按名称精确匹配
-  cmcli delete <库id> <元件id>                  删除元件
-  cmcli export <库id> <文件路径>                导出库为 JSON（与 GUI 导出文件格式一致）
-  cmcli import <库id> <文件路径>                从 JSON 导入到库（同名元件跳过）
-  cmcli datasheets                             列出本地手册文件及引用情况
-  cmcli ds-delete <手册文件名>                  删除本地手册（同步清除引用）
-  cmcli path-add                               把 cmcli 所在目录加入用户 PATH（免全路径调用）
-  cmcli path-remove                            从用户 PATH 移除 cmcli 所在目录
-
-add / update 选项（均可选）：
-  --category <类别>   --package <封装>   --manufacturer <制造商>
-  --qty <数量>        --location <位置>   --notes <备注>
-  --precision <精度>  电阻/电容/电感的精度，如 "±1%"、"±20% M"（其他类别一般不用）
-  --datasheet <值>    http(s) 链接原样保存；本地 PDF 路径会复制进
-                      %APPDATA%\com.componentmanager.app\datasheets\（同名复用）
-
-示例（入库一批元件）：
-  cmcli libs
-  cmcli add 1 "STM32F103C8T6" --category IC --package LQFP48 --manufacturer ST --qty 5 --location B03-R1 --datasheet "D:\datasheet\stm32f1.pdf"
-  cmcli adjust 1 "10k电阻" -3
-  cmcli find 1 0805"#
-    )
+fn dispatch(p: &Parsed) -> Result<(), String> {
+    match COMMANDS.iter().find(|(name, _)| *name == p.cmd) {
+        Some((_, handler)) => handler(p),
+        None => Err(format!("未知命令：{}，运行 cmcli help 查看全部命令", p.cmd)),
+    }
 }
 
 fn run() -> i32 {
     let p = match parse_args() {
         Ok(p) => p,
+        Err(e) if e == "USAGE" => {
+            println!("{}", help::help_text());
+            return 0;
+        }
         Err(e) => {
-            if e == "USAGE" {
-                println!("{}", help_text());
-                return 0;
-            }
             eprintln!("错误：{e}");
             return 2;
         }
     };
-    let r = match p.cmd.as_str() {
-        "libs" => cmd_libs(&p),
-        "lib-create" => cmd_lib_create(&p),
-        "list" => cmd_list(&p),
-        "find" => cmd_find(&p),
-        "add" => cmd_add(&p),
-        "update" => cmd_update(&p),
-        "adjust" => cmd_adjust(&p),
-        "delete" => cmd_delete(&p),
-        "export" => cmd_export(&p),
-        "import" => cmd_import(&p),
-        "datasheets" => cmd_datasheets(&p),
-        "ds-delete" => cmd_ds_delete(&p),
-        "path-add" => cmd_path_add(&p),
-        "path-remove" => cmd_path_remove(&p),
-        other => Err(format!("未知命令：{other}（运行 cmcli help 查看全部命令）")),
-    };
-    match r {
+    match dispatch(&p) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("错误：{e}");
