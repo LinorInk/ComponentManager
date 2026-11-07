@@ -21,6 +21,7 @@ src-tauri/icons/Square*.png
 .vscode/
 .idea/
 .trae/
+.trae-html-share-packages/
 
 # 系统、编辑器与构建临时文件
 Thumbs.db
