@@ -34,10 +34,17 @@ jobs:
       - name: 前端构建
         run: npm run build
 
-      - name: 编译检查（cm-core / cmcli / GUI）
+      # tauri-build 会校验 externalBin 的实体文件是否存在，
+      # 该文件在 .gitignore 里，CI 全新检出时必须先产出，否则 src-tauri 编译直接失败
+      - name: 编译 cmcli 并准备外部程序
+        run: |
+          cargo build --bin cmcli --manifest-path cmcli/Cargo.toml
+          New-Item -ItemType Directory -Force -Path src-tauri/bin | Out-Null
+          Copy-Item cmcli/target/debug/cmcli.exe src-tauri/bin/cmcli-x86_64-pc-windows-msvc.exe
+
+      - name: 编译检查（cm-core / GUI）
         run: |
           cargo check --manifest-path core/Cargo.toml
-          cargo check --manifest-path cmcli/Cargo.toml
           cargo check --manifest-path src-tauri/Cargo.toml
 
   release:
