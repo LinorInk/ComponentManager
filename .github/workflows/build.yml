@@ -1,0 +1,76 @@
+# 自动构建流水线
+#   推送到 master：只做前端与 Rust 编译检查，快速发现破坏性改动
+#   推送 v* 标签：编译 cmcli + 打包 MSI/NSIS，并自动创建 Release 上传安装包
+name: build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  check:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            cmcli -> target
+
+      - run: npm ci
+
+      - name: 前端构建
+        run: npm run build
+
+      - name: 编译检查（cm-core / cmcli / GUI）
+        run: |
+          cargo check --manifest-path core/Cargo.toml
+          cargo check --manifest-path cmcli/Cargo.toml
+          cargo check --manifest-path src-tauri/Cargo.toml
+
+  release:
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            cmcli -> target
+
+      - run: npm ci
+
+      # beforeBuildCommand 已包含 node scripts/sync-cli.mjs（先编译 cmcli 再打包）
+      - name: 打包并发布 Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "ComponentManager ${{ github.ref_name }}"
+          releaseBody: "安装包（MSI / NSIS）随附于下方资产，安装时可选把 cmcli 加入 PATH。"
+          releaseDraft: false
+          prerelease: false
