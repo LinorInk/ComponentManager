@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { confirm, message } from "@tauri-apps/plugin-dialog";
 
-const CATEGORIES = ["电阻", "电容", "电感", "二极管", "三极管", "IC", "模块", "其他"];
+const CATEGORIES = ["电阻", "电容", "电感", "二极管", "三极管", "IC", "接口", "模块", "其他"];
 
 // 各类别的常用封装预设：点击即填入，仍可自己手输任意值
 const PKG_PRESETS = {
@@ -13,6 +13,7 @@ const PKG_PRESETS = {
   二极管: ["SOD-123", "SOD-323", "SMA(DO-214AC)", "SMB(DO-214AA)", "DO-41", "DO-35 玻璃"],
   三极管: ["SOT-23", "SOT-323", "SOT-89", "TO-92", "TO-220", "TO-252(DPAK)", "TO-263"],
   IC: ["SOT-23-5", "SOP-8", "SOP-16", "TSSOP-20", "SSOP-28", "QFN-32", "LQFP48", "TQFP64", "DIP-8", "DIP-40"],
+  接口: ["USB-A 直插", "USB-C 贴片", "Micro USB", "HDMI", "RJ45", "排针 2.54", "排母 2.54", "XH2.54", "PH2.0", "DC 插座", "接线端子"],
   模块: ["DIP 排针 2.54", "邮票孔", "ESP32 模组", "USB 型", "螺丝端子"],
   其他: ["0603", "0805", "SOT-23", "SOP-8", "DIP", "直插", "贴片"],
 };
@@ -79,7 +80,7 @@ export default function App() {
       setBusy(true);
       setIoMsg("");
       const saved = await invoke("export_library", { libraryId: lib.id });
-      if (saved) setIoMsg(`已导出：${saved}，把这个 JSON 文件发给同事即可`);
+      if (saved) setIoMsg(`已导出：${saved}`);
     } catch (e) {
       setIoMsg(`导出失败：${e}`);
     } finally {
@@ -493,7 +494,7 @@ export default function App() {
         <span>
           库「{lib.name}」共 {rows.length} 条
         </span>
-        <button onClick={doExport} disabled={busy} title="导出为 JSON，发给同事导入">
+        <button onClick={doExport} disabled={busy} title="导出为 JSON">
           ⬆ 导出本库
         </button>
         <button onClick={doImport} disabled={busy} title="从 JSON 文件导入到当前库">
@@ -513,7 +514,7 @@ export default function App() {
           <div className="empty">
             {activeKw
               ? `库「${lib.name}」里没有匹配的元件`
-              : `库「${lib.name}」还是空的，点击「＋ 新增元件」开始录入`}
+              : `库「${lib.name}」还是空的`}
           </div>
         ) : (
           <table>
@@ -731,7 +732,7 @@ export default function App() {
               <div className="body plain">读取中…</div>
             ) : dsMgr.files.length === 0 ? (
               <div className="body plain">
-                还没有存过本地手册。在新增/编辑元件时用「📄 本地 PDF」选择文件即可。
+                还没有存过本地手册。
               </div>
             ) : (
               <div className="body ds-list">
