@@ -76,6 +76,15 @@ fn open_datasheet(db: State<'_, Db>, file_name: String) -> Result<bool, String> 
     Ok(true)
 }
 
+/// 在文件资源管理器中打开手册存放目录（目录不存在时先创建）
+#[tauri::command]
+fn open_datasheets_dir(db: State<'_, Db>) -> Result<bool, String> {
+    // db.data_dir 是应用数据根目录，手册在它的 datasheets 子目录下
+    let dir = datasheet::dir_in(&db.data_dir)?;
+    tauri_plugin_opener::open_path(&dir, None::<&str>).map_err(err)?;
+    Ok(true)
+}
+
 /// 列出本地手册文件及引用情况
 #[tauri::command]
 fn list_datasheets(db: State<'_, Db>) -> Result<Vec<DatasheetInfo>, String> {
@@ -274,6 +283,7 @@ fn main() {
             db_path,
             pick_datasheet,
             open_datasheet,
+            open_datasheets_dir,
             list_datasheets,
             delete_datasheet,
             list_libraries,

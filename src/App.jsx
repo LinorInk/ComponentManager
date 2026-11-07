@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { confirm, message } from "@tauri-apps/plugin-dialog";
+import appIcon from "../src-tauri/icons/128x128.png";
 
 const CATEGORIES = ["电阻", "电容", "电感", "二极管", "三极管", "IC", "接口", "模块", "其他"];
 
@@ -28,6 +30,12 @@ const PRECISION_PRESETS = {
 const RLC = ["电阻", "电容", "电感"];
 const LOW_STOCK = 5; // 数量低于此值高亮提醒
 
+// 类别输入框的下拉候选：空白时列出全部预设，否则按已输入内容过滤
+const matchCategories = (kw) => {
+  const k = (kw || "").trim();
+  return k ? CATEGORIES.filter((c) => c.includes(k)) : CATEGORIES;
+};
+
 // 页面是否运行在 Tauri 应用窗口中（浏览器里打开 dev 页面时无法调用后端命令）
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -44,10 +52,36 @@ function notice(text, title = "元件库存管理器") {
   return window.alert(text);
 }
 
+// 系统标题栏已隐藏（tauri.conf.json 里 decorations: false），
+// 这里自绘最小化 / 最大化 / 关闭三个按钮，嵌在顶栏右侧与页面内容同排。
+function WindowControls() {
+  if (!inTauri) return null;
+  const win = getCurrentWindow();
+  return (
+    <div className="win-ctrl">
+      <button type="button" title="最小化" onClick={() => win.minimize()}>
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <path d="M1.5 5h7" stroke="currentColor" strokeWidth="1.2" />
+        </svg>
+      </button>
+      <button type="button" title="最大化 / 还原" onClick={() => win.toggleMaximize()}>
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1.2" />
+        </svg>
+      </button>
+      <button type="button" className="close" title="关闭" onClick={() => win.close()}>
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" strokeWidth="1.2" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
 const EMPTY_FORM = {
   id: 0,
   name: "",
-  category: "电阻",
+  category: "",
   package: "",
   manufacturer: "",
   quantity: 0,
@@ -73,6 +107,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [sort, setSort] = useState({ key: "id", dir: -1 });
   const [modal, setModal] = useState(null); // { mode: "add" | "edit", form, err }
+  const [catOpen, setCatOpen] = useState(false); // 类别下拉候选是否展开
   const [ioMsg, setIoMsg] = useState(""); // 导入/导出结果提示
 
   async function doExport() {
@@ -245,10 +280,12 @@ export default function App() {
 
   function openAdd() {
     setModal({ mode: "add", form: { ...EMPTY_FORM }, err: "" });
+    setCatOpen(false);
   }
 
   function openEdit(row) {
     setModal({ mode: "edit", form: { ...EMPTY_FORM, ...row }, err: "" });
+    setCatOpen(false);
   }
 
   function setField(field, value) {
@@ -373,7 +410,14 @@ export default function App() {
   if (!lib) {
     // 启动 / 切库时的库选择页
     return (
-      <div className="app">
+      <div className="app" data-tauri-drag-region>
+        <div className="titlebar" data-tauri-drag-region>
+          <img className="titlebar-logo" src={appIcon} alt="元件库存管理器图标" />
+          <span className="titlebar-title" data-tauri-drag-region>
+            元件库存管理器
+          </span>
+          <WindowControls />
+        </div>
         {!inTauri && (
           <div className="browser-warn">
             此页面在浏览器中打开，只能预览界面，无法读写数据库。请在终端运行
@@ -452,14 +496,20 @@ export default function App() {
   const arrow = (key) => (sort.key === key ? (sort.dir > 0 ? " ↑" : " ↓") : "");
 
   return (
-    <div className="app">
+    <div className="app" data-tauri-drag-region>
+      <div className="titlebar" data-tauri-drag-region>
+        <img className="titlebar-logo" src={appIcon} alt="元件库存管理器图标" />
+        <span className="titlebar-title" data-tauri-drag-region>
+          元件库存管理器
+        </span>
+        <WindowControls />
+      </div>
       {!inTauri && (
         <div className="browser-warn">
           此页面在浏览器中打开，只能预览界面，无法读写数据库。请在应用窗口中操作。
         </div>
       )}
-      <div className="topbar">
-        <h1>元件库存管理器</h1>
+      <div className="topbar" data-tauri-drag-region>
         <button className="lib-chip" onClick={backToPicker} title="返回库选择">
           📦 {lib.name} · 切换库
         </button>
@@ -569,8 +619,8 @@ export default function App() {
       </div>
 
       {modal && (
-        <div className="modal-mask" onClick={() => setModal(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-mask">
+          <div className="modal">
             <header>
               {modal.mode === "add" ? "新增元件" : `编辑：${modal.form.name}`}
             </header>
@@ -584,17 +634,46 @@ export default function App() {
               />
 
               <label>类别</label>
-              <select
-                className="full"
-                value={modal.form.category}
-                onChange={(e) => setField("category", e.target.value)}
-              >
-                {CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
+              <div className="cat-field">
+                <input
+                  className="full"
+                  value={modal.form.category ?? ""}
+                  onChange={(e) => setField("category", e.target.value)}
+                  onFocus={() => setCatOpen(true)}
+                  onBlur={() => setCatOpen(false)}
+                />
+                {modal.form.category && (
+                  <button
+                    type="button"
+                    className="cat-clear"
+                    title="清空类别"
+                    onClick={() => setField("category", "")}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+                      <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" strokeWidth="1.1" />
+                      <path d="M5.8 5.8l4.4 4.4M10.2 5.8l-4.4 4.4" stroke="currentColor" strokeWidth="1.1" />
+                    </svg>
+                  </button>
+                )}
+                {catOpen && matchCategories(modal.form.category).length > 0 && (
+                  <ul className="cat-list">
+                    {matchCategories(modal.form.category).map((c) => (
+                      <li key={c}>
+                        <button
+                          type="button"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => {
+                            setField("category", c);
+                            setCatOpen(false);
+                          }}
+                        >
+                          {c}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
 
               <label>封装</label>
               <div className="pkg-area">
@@ -724,9 +803,16 @@ export default function App() {
           <div className="modal wide" onClick={(e) => e.stopPropagation()}>
             <header>
               本地手册管理
-              <span className="muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 10 }}>
+              <button
+                className="link-like"
+                style={{ fontWeight: 400, fontSize: 12, marginLeft: 10 }}
+                onClick={() =>
+                  invoke("open_datasheets_dir").catch((e) => notice(String(e), "打开文件夹"))
+                }
+                title="在文件资源管理器中打开手册存放目录"
+              >
                 存放目录：…\com.componentmanager.app\datasheets
-              </span>
+              </button>
             </header>
             {dsMgr.busy ? (
               <div className="body plain">读取中…</div>

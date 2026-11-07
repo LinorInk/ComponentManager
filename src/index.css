@@ -30,6 +30,73 @@ body {
   font-size: 14px;
 }
 
+/* 全局隐藏原生滚动条外观（含 Windows 的箭头按钮），滚轮 / 触控板 / 键盘滚动照常生效 */
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* 自绘标题栏：替代系统标题栏，左侧标题、右侧窗口按钮，整条可拖动 */
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 6px 0 14px;
+  background: var(--bg);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.titlebar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.titlebar-logo {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.win-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.win-ctrl button {
+  width: 34px;
+  height: 30px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+}
+
+.win-ctrl button:hover {
+  background: #e8eaee;
+}
+
+.win-ctrl button.close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
 .app {
   display: flex;
   flex-direction: column;
@@ -45,13 +112,6 @@ body {
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
-}
-
-.topbar h1 {
-  font-size: 17px;
-  margin: 0;
-  font-weight: 600;
-  white-space: nowrap;
 }
 
 .search-row {
@@ -362,6 +422,64 @@ td .prec {
 
 .full {
   width: 100%;
+}
+
+/* 类别输入：隐藏 datalist 的原生箭头，改为尾部清空按钮 */
+.cat-field {
+  position: relative;
+}
+
+.cat-field input {
+  padding-right: 30px;
+}
+
+.cat-field .cat-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.cat-field .cat-clear:hover {
+  background: transparent;
+  color: var(--text);
+}
+
+.cat-field .cat-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 180px;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+}
+
+.cat-field .cat-list button {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  text-align: left;
 }
 
 /* ---------- 元件库选择页 ---------- */
