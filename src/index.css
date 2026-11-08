@@ -16,11 +16,14 @@
   box-sizing: border-box;
 }
 
+/* 锁定页面本身不滚动：触控板横向/纵向滑动只在内部滚动容器内生效，不会带动整个界面偏移 */
 html,
 body,
 #root {
   height: 100%;
   margin: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 body {
@@ -218,6 +221,7 @@ button.link-like {
 .table-wrap {
   flex: 1;
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 0 16px 16px;
 }
 
@@ -486,6 +490,7 @@ td .prec {
 .picker {
   flex: 1;
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 36px 40px;
 }
 
