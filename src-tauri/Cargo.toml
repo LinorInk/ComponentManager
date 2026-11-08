@@ -1,6 +1,6 @@
 [package]
 name = "component-manager"
-version = "0.1.0"
+version = "0.1.1"
 description = "元件库存管理器 —— 个人电子元器件入库、查询与管理"
 edition = "2021"
 

@@ -1,6 +1,6 @@
 [package]
 name = "cm-core"
-version = "0.1.0"
+version = "0.1.1"
 description = "元件库存管理器共享库 —— 表结构、迁移、模型与数据操作，图形界面与 CLI 共用"
 edition = "2021"
 

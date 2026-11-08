@@ -1,6 +1,6 @@
 [package]
 name = "cmcli"
-version = "0.1.0"
+version = "0.1.1"
 description = "元件库存管理器 命令行工具 —— 与图形界面共用同一 SQLite 数据库"
 edition = "2021"
 
